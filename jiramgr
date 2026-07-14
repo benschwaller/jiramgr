@@ -10,6 +10,7 @@ Usage:
     jiramgr mine --backlog                     List your backlog cards
     jiramgr move ISSUE-123                     Interactive status picker
     jiramgr move ISSUE-123 "Done"              Move directly
+    jiramgr move ISSUE-123 "Done" --comment "Fixed and verified"  Move to Done with required comment
     jiramgr comment ISSUE-123 "text"           Add a comment
 """
 
@@ -29,6 +30,9 @@ from urllib.parse import quote
 JIRAMGR_DIR = os.path.expanduser("~/.jiramgr")
 CONFIG_PATH = os.path.join(JIRAMGR_DIR, "config.json")
 TEMPLATES_DIR = os.path.join(JIRAMGR_DIR, "templates")
+
+# Templates ship in the repo alongside this script
+REPO_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
 # Legacy config path (pre-migration)
 OLD_CONFIG_PATH = os.path.expanduser("~/.jiramgr.json")
@@ -239,25 +243,40 @@ DEFAULT_TEMPLATE = """\
 
 
 def get_template(issue_type):
-    """Return template content for an issue type. Checks ~/.jiramgr/templates/ first."""
+    """Return template content for an issue type.
+
+    Checks ~/.jiramgr/templates/ for a local override first, then falls back
+    to the templates shipped in the repo, then to the built-in default.
+    """
     custom = os.path.join(TEMPLATES_DIR, f"{issue_type}.md")
     if os.path.exists(custom):
         with open(custom) as f:
+            return f.read()
+    repo = os.path.join(REPO_TEMPLATES_DIR, f"{issue_type}.md")
+    if os.path.exists(repo):
+        with open(repo) as f:
             return f.read()
     return DEFAULT_TEMPLATE
 
 
 def cmd_install_templates(args):
-    """Copy default templates to ~/.jiramgr/templates/ for customization."""
+    """Copy repo templates to ~/.jiramgr/templates/ for local customization."""
     os.makedirs(TEMPLATES_DIR, exist_ok=True)
     for issue_type in ("story", "task", "spike"):
-        path = os.path.join(TEMPLATES_DIR, f"{issue_type}.md")
-        with open(path, "w") as f:
-            f.write(DEFAULT_TEMPLATE)
-        print(f"  {path}")
+        src = os.path.join(REPO_TEMPLATES_DIR, f"{issue_type}.md")
+        dst = os.path.join(TEMPLATES_DIR, f"{issue_type}.md")
+        if os.path.exists(src):
+            with open(src) as f:
+                content = f.read()
+        else:
+            content = DEFAULT_TEMPLATE
+        with open(dst, "w") as f:
+            f.write(content)
+        print(f"  {dst}")
     print()
-    ok(f"Templates installed to {TEMPLATES_DIR}")
+    ok(f"Templates copied to {TEMPLATES_DIR}")
     print(f"Edit them to customize defaults for your team.")
+    print(f"Source templates live in the repo: {REPO_TEMPLATES_DIR}")
 
 
 def open_editor(content):
@@ -726,6 +745,16 @@ def cmd_move(args):
         transition_id = transitions[idx]["id"]
         target = transitions[idx]["name"]
 
+    # Require a status comment when moving to Done
+    comment_text = args.comment
+    if target.lower() == "done":
+        if not comment_text:
+            print(f"\n{C.BOLD}A status/documentation comment is required when moving to Done.{C.NC}")
+            comment_text = input("Comment: ").strip()
+        if not comment_text:
+            err("Cannot move to Done without a comment. Aborting.")
+            sys.exit(1)
+
     # Transition using the integer ID (v3 API requirement)
     try:
         api(config, "POST", f"/rest/api/3/issue/{issue}/transitions",
@@ -734,6 +763,15 @@ def cmd_move(args):
     except JiraError as e:
         err(f"Failed to transition {issue}: {e}")
         sys.exit(1)
+
+    if comment_text and target.lower() == "done":
+        try:
+            api(config, "POST", f"/rest/api/3/issue/{issue}/comment",
+                {"body": text_to_adf(comment_text)})
+            ok(f"{issue} — status comment added")
+        except JiraError as e:
+            err(f"{issue} moved to Done, but failed to add comment: {e}")
+            sys.exit(1)
 
 
 def cmd_comment(args):
@@ -794,6 +832,7 @@ def main():
     p = subparsers.add_parser("move", help="Transition a card")
     p.add_argument("issue", help="Issue key (e.g. ENG-123)")
     p.add_argument("status", nargs="?", help="Target status (skip interactive picker)")
+    p.add_argument("--comment", help="Status/documentation comment (required when moving to Done)")
     p.set_defaults(func=cmd_move)
 
     # comment

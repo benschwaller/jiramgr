@@ -56,7 +56,7 @@ Types: `story`, `task`, `spike` — all linked to an epic automatically.
 jiramgr install-templates   # copy defaults to ~/.jiramgr/templates/
 ```
 
-Edit `~/.jiramgr/templates/story.md` (or `task.md`, `spike.md`) to customize the fields your team always needs. Template sections:
+Edit `~/.jiramgr/templates/story.md` (or `task.md`, `spike.md`) to customize the fields your team always needs. The source templates live in the repo at `templates/` — edit them there to change defaults for everyone. Template sections:
 
 | Section | What it sets |
 |---|---|
@@ -81,6 +81,12 @@ jiramgr move ISSUE-123           # interactive status picker
 jiramgr move ISSUE-123 "Done"   # transition directly
 ```
 
+Moving to **Done** requires a status/documentation comment. You'll be prompted for one if not supplied:
+
+```bash
+jiramgr move ISSUE-123 "Done" --comment "Verified in staging; docs updated"
+```
+
 ### Comment
 
 ```bash
@@ -93,8 +99,10 @@ jiramgr comment ISSUE-123 "Fixed the bug"   # inline
 ```
 ~/.jiramgr/
 ├── config.json     # chmod 600 — credentials and field IDs
-└── templates/      # customizable .md templates per issue type
+└── templates/      # optional local overrides (copy of repo templates)
 ```
+
+Repo templates (source of truth): `templates/{story,task,spike}.md`.
 
 Reconfigure anytime:
 
