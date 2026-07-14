@@ -19,11 +19,19 @@ import getpass
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 
-CONFIG_PATH = os.path.expanduser("~/.jiramgr.json")
+JIRAMGR_DIR = os.path.expanduser("~/.jiramgr")
+CONFIG_PATH = os.path.join(JIRAMGR_DIR, "config.json")
+TEMPLATES_DIR = os.path.join(JIRAMGR_DIR, "templates")
+
+# Legacy config path (pre-migration)
+OLD_CONFIG_PATH = os.path.expanduser("~/.jiramgr.json")
 
 
 # ── Colors ───────────────────────────────────────────────────
@@ -51,6 +59,11 @@ def warn(msg):
 # ── Config ───────────────────────────────────────────────────
 
 def load_config():
+    # Migrate old config location if needed
+    if not os.path.exists(CONFIG_PATH) and os.path.exists(OLD_CONFIG_PATH):
+        os.makedirs(JIRAMGR_DIR, exist_ok=True)
+        os.rename(OLD_CONFIG_PATH, CONFIG_PATH)
+
     if not os.path.exists(CONFIG_PATH):
         err(f"No config found. Run: {C.BOLD}jiramgr setup{C.NC}")
         sys.exit(1)
@@ -66,8 +79,7 @@ def load_config():
 
 
 def save_config(config):
-    config_dir = os.path.dirname(CONFIG_PATH) or "."
-    os.makedirs(config_dir, exist_ok=True)
+    os.makedirs(JIRAMGR_DIR, exist_ok=True)
     fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(config, f, indent=2)
@@ -204,6 +216,164 @@ def pick_epic(config):
     return issues[idx]["key"]
 
 
+# ── Templates ───────────────────────────────────────────────
+
+DEFAULT_TEMPLATE = """\
+# <enter title here>
+
+## Description
+
+
+## Acceptance Criteria
+- [ ] 
+
+## Story Points
+
+
+## Assignee
+<blank or "me" for yourself, or an email>
+
+## Epic
+<KEY or leave blank to pick interactively>
+"""
+
+
+def get_template(issue_type):
+    """Return template content for an issue type. Checks ~/.jiramgr/templates/ first."""
+    custom = os.path.join(TEMPLATES_DIR, f"{issue_type}.md")
+    if os.path.exists(custom):
+        with open(custom) as f:
+            return f.read()
+    return DEFAULT_TEMPLATE
+
+
+def cmd_install_templates(args):
+    """Copy default templates to ~/.jiramgr/templates/ for customization."""
+    os.makedirs(TEMPLATES_DIR, exist_ok=True)
+    for issue_type in ("story", "task", "spike"):
+        path = os.path.join(TEMPLATES_DIR, f"{issue_type}.md")
+        with open(path, "w") as f:
+            f.write(DEFAULT_TEMPLATE)
+        print(f"  {path}")
+    print()
+    ok(f"Templates installed to {TEMPLATES_DIR}")
+    print(f"Edit them to customize defaults for your team.")
+
+
+def open_editor(content):
+    """Open $EDITOR with content, return edited result."""
+    editor = os.environ.get("EDITOR", "vim")
+    with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        subprocess.run([editor, tmp_path], check=True)
+        with open(tmp_path) as f:
+            return f.read()
+    finally:
+        os.unlink(tmp_path)
+
+
+def parse_template(content):
+    """Parse a filled-out template into structured fields."""
+    result = {
+        "summary": None,
+        "description_text": "",
+        "acceptance_criteria": [],
+        "story_points": None,
+        "assignee": None,
+        "epic": None,
+    }
+
+    # Summary: first # heading
+    m = re.search(r"^# (.+)$", content, re.MULTILINE)
+    if m:
+        result["summary"] = m.group(1).strip()
+
+    # Sections: split by ## headings
+    parts = re.split(r"^## (.+)$", content, flags=re.MULTILINE)
+    # parts[0] = preamble, then alternating heading/body
+    for i in range(1, len(parts) - 1, 2):
+        heading = parts[i].strip().lower()
+        body = parts[i + 1].strip()
+
+        if heading == "description":
+            result["description_text"] = body
+        elif heading == "acceptance criteria":
+            result["acceptance_criteria"] = [
+                re.sub(r"^-\s*\[[ x]\]\s*", "", line).strip()
+                for line in body.splitlines()
+                if line.strip().startswith("- [")
+            ]
+        elif heading == "story points":
+            try:
+                result["story_points"] = float(body.strip())
+            except ValueError:
+                pass
+        elif heading == "assignee":
+            val = body.strip()
+            if val and val.lower() != "me" and not val.startswith("<"):
+                result["assignee"] = val
+        elif heading == "epic":
+            val = body.strip()
+            if val and not val.startswith("<"):
+                result["epic"] = val
+
+    return result
+
+
+def markdown_to_adf(description_text, acceptance_criteria):
+    """Convert description text + AC list to Atlassian Document Format."""
+    content = []
+
+    # Description text -> paragraphs (split on blank lines)
+    if description_text:
+        for para in re.split(r"\n\s*\n", description_text):
+            para = para.strip()
+            if para:
+                content.append({
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": para}],
+                })
+
+    # Acceptance criteria -> heading + task list
+    if acceptance_criteria:
+        content.append({
+            "type": "heading",
+            "attrs": {"level": 3},
+            "content": [{"type": "text", "text": "Acceptance Criteria"}],
+        })
+        tasks = []
+        for item in acceptance_criteria:
+            tasks.append({
+                "type": "task",
+                "attrs": {"state": "TODO"},
+                "content": [{"type": "text", "text": item}],
+            })
+        content.append({"type": "taskList", "content": tasks})
+
+    return {"type": "doc", "version": 1, "content": content}
+
+
+def resolve_assignee(config, assignee_text):
+    """Resolve assignee text to a Jira accountId. Returns None for self."""
+    if not assignee_text or assignee_text.lower() == "me":
+        # Get current user's accountId
+        try:
+            result = api(config, "GET", "/rest/api/3/myself")
+            return result.get("accountId")
+        except JiraError:
+            return None
+    # Try user search by email/name
+    try:
+        result = api(config, "GET", f"/rest/api/3/user/search?query={quote(assignee_text)}")
+        if result and isinstance(result, list) and result:
+            return result[0].get("accountId")
+    except JiraError:
+        warn(f"Could not find user '{assignee_text}'. No assignee set.")
+    return None
+
+
 # ── Commands ─────────────────────────────────────────────────
 
 def cmd_setup(args):
@@ -250,12 +420,15 @@ def cmd_setup(args):
         fields = api(config, "GET", "/rest/api/3/field")
         epic_link_field = None
         sprint_field = None
+        story_points_field = None
         for f in fields:
             name = f.get("name", "").lower()
             if name == "epic link":
                 epic_link_field = f["id"]
             elif name == "sprint":
                 sprint_field = f["id"]
+            elif name == "story points":
+                story_points_field = f["id"]
 
         if epic_link_field:
             ok(f"  Epic Link: {epic_link_field}")
@@ -266,6 +439,11 @@ def cmd_setup(args):
             ok(f"  Sprint: {sprint_field}")
         else:
             sprint_field = input("  Sprint not found. Enter field ID: ").strip()
+
+        if story_points_field:
+            ok(f"  Story Points: {story_points_field}")
+        else:
+            story_points_field = input("  Story Points not found. Enter field ID (or blank): ").strip()
 
         # 6. Epic label
         print(f"\nWhat label identifies your long-lived epics?")
@@ -278,11 +456,13 @@ def cmd_setup(args):
             "epic_label": epic_label,
             "epic_link_field": epic_link_field,
             "sprint_field": sprint_field,
+            "story_points_field": story_points_field,
         })
 
         save_config(config)
         print()
         ok(f"Config saved to {CONFIG_PATH}")
+        print(f"\nTemplates: {TEMPLATES_DIR}")
         print(f"\nYou're ready! Try: {C.BOLD}jiramgr mine{C.NC}")
 
     except KeyboardInterrupt:
@@ -306,11 +486,37 @@ def cmd_create(args):
 
     issue_type = args.type.capitalize()
 
-    # Resolve epic
-    epic_key = args.epic or pick_epic(config)
+    if not args.summary and not args.template:
+        err("Missing summary. Use -t for template mode or provide a summary.")
+        sys.exit(1)
+
+    # ── Template mode: open editor, parse result ──
+    parsed = None
+    if args.template:
+        template = get_template(args.type)
+        # Pre-fill summary if provided on CLI
+        if args.summary:
+            template = re.sub(r"^# .+$", f"# {args.summary}", template, count=1, flags=re.MULTILINE)
+        print(f"\nOpening {args.type} template in {os.environ.get('EDITOR', 'vim')}...")
+        edited = open_editor(template)
+        parsed = parse_template(edited)
+
+        if not parsed["summary"] or parsed["summary"].startswith("<"):
+            err("Summary is required. Edit the '# ...' line in the template.")
+            sys.exit(1)
+        if not args.summary:
+            args.summary = parsed["summary"]
+
+    # ── Resolve epic ──
+    if args.epic:
+        epic_key = args.epic
+    elif parsed and parsed["epic"]:
+        epic_key = parsed["epic"]
+    else:
+        epic_key = pick_epic(config)
     validate_issue_key(epic_key)
 
-    # Resolve sprint
+    # ── Resolve sprint ──
     sprint_id = None
     if args.backlog:
         pass
@@ -332,7 +538,7 @@ def cmd_create(args):
             if not sprint_id:
                 warn("No active sprint found. Going to backlog.")
 
-    # Build fields
+    # ── Build fields ──
     fields = {
         "project": {"key": config["project"]},
         "summary": args.summary,
@@ -342,7 +548,30 @@ def cmd_create(args):
     if sprint_id:
         fields[config["sprint_field"]] = sprint_id
 
-    # Create
+    # Template-specific fields
+    if parsed:
+        # Description (ADF)
+        desc_adf = markdown_to_adf(parsed["description_text"], parsed["acceptance_criteria"])
+        if desc_adf["content"]:
+            fields["description"] = desc_adf
+
+        # Story points
+        if parsed["story_points"] and config.get("story_points_field"):
+            fields[config["story_points_field"]] = parsed["story_points"]
+
+        # Assignee
+        assignee_id = resolve_assignee(config, parsed["assignee"])
+        if assignee_id:
+            fields["assignee"] = {"accountId": assignee_id}
+    else:
+        # Quick-create: default assignee to current user
+        try:
+            myself = api(config, "GET", "/rest/api/3/myself")
+            fields["assignee"] = {"accountId": myself.get("accountId")}
+        except JiraError:
+            pass
+
+    # ── Create ──
     print()
     if sprint_id:
         print(f"Creating {issue_type} → {epic_key} (sprint {sprint_id})...")
@@ -493,11 +722,16 @@ def main():
     p = subparsers.add_parser("setup", help="Interactive setup walkthrough")
     p.set_defaults(func=cmd_setup)
 
+    # install-templates
+    p = subparsers.add_parser("install-templates", help="Copy default templates to ~/.jiramgr/templates/")
+    p.set_defaults(func=cmd_install_templates)
+
     # create: story | task | spike
     for issue_type in ("story", "task", "spike"):
         p = subparsers.add_parser(issue_type, help=f"Create a {issue_type}")
-        p.add_argument("summary", help="Issue summary/title")
+        p.add_argument("summary", nargs="?", help="Issue summary (required unless --template)")
         p.add_argument("-e", "--epic", help="Epic key (skip epic picker)")
+        p.add_argument("-t", "--template", action="store_true", help="Open $EDITOR with structured template")
         p.add_argument("--sprint", action="store_true", help="Assign to active sprint")
         p.add_argument("--backlog", action="store_true", help="Keep in backlog")
         p.set_defaults(func=cmd_create, type=issue_type)
