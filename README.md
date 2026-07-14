@@ -33,6 +33,7 @@ jiramgr story "Add dark mode"                        # pick epic, sprint prompt
 jiramgr task "Update deps" -e EPIC-42               # skip epic picker
 jiramgr spike "Research K8s" --sprint               # auto-assign to active sprint
 jiramgr story "Audit logs" -e EPIC-10 --backlog     # fully non-interactive
+jiramgr story                                        # prompts for summary
 
 # Template create — opens $EDITOR with structured fields
 jiramgr story -t                                     # fill out description, AC, points, assignee
