@@ -7,10 +7,10 @@ Lightweight Jira card manager for the command line. Pure Python 3 — no pip, no
 ```bash
 ./jiramgr setup             # one-time interactive walkthrough
 ./jiramgr mine              # list your sprint cards
-./jiramgr install-templates # copy templates to ~/.jiramgr/templates/
+./jiramgr install-templates # copy templates to ~/.config/jiramgr/templates/
 ```
 
-`setup` walks you through everything: instance URL, API token (stored securely at `~/.jiramgr/config.json`, chmod 600), project selection, custom field auto-detection (Epic Link, Sprint, Story Points), and epic label.
+`setup` walks you through everything: instance URL, API token (stored securely at `~/.config/jiramgr/config.json`, chmod 600), project selection, custom field auto-detection (Epic Link, Sprint, Story Points), and epic label.
 
 ## Requirements
 
@@ -53,10 +53,10 @@ Types: `story`, `task`, `spike` — all linked to an epic automatically.
 ### Templates
 
 ```bash
-jiramgr install-templates   # copy defaults to ~/.jiramgr/templates/
+jiramgr install-templates   # copy defaults to ~/.config/jiramgr/templates/
 ```
 
-Edit `~/.jiramgr/templates/story.md` (or `task.md`, `spike.md`) to customize the fields your team always needs. The source templates live in the repo at `templates/` — edit them there to change defaults for everyone. Template sections:
+Edit `~/.config/jiramgr/templates/story.md` (or `task.md`, `spike.md`) to customize the fields your team always needs. The source templates live in the repo at `templates/` — edit them there to change defaults for everyone. Template sections:
 
 | Section | What it sets |
 |---|---|
@@ -97,10 +97,12 @@ jiramgr comment ISSUE-123 "Fixed the bug"   # inline
 ## Config
 
 ```
-~/.jiramgr/
+~/.config/jiramgr/
 ├── config.json     # chmod 600 — credentials and field IDs
 └── templates/      # optional local overrides (copy of repo templates)
 ```
+
+Config lives under `$XDG_CONFIG_HOME/jiramgr/` if that env var is set (otherwise `~/.config/jiramgr/`). Existing `~/.jiramgr/` configs are auto-migrated on first run.
 
 Repo templates (source of truth): `templates/{story,task,spike}.md`.
 

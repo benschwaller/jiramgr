@@ -28,14 +28,19 @@ import urllib.request
 import uuid
 from urllib.parse import quote
 
-JIRAMGR_DIR = os.path.expanduser("~/.jiramgr")
-CONFIG_PATH = os.path.join(JIRAMGR_DIR, "config.json")
-TEMPLATES_DIR = os.path.join(JIRAMGR_DIR, "templates")
+# XDG Base Directory: $XDG_CONFIG_HOME/jiramgr/ or ~/.config/jiramgr/
+_xdg_config = os.environ.get("XDG_CONFIG_HOME")
+CONFIG_DIR = os.path.join(_xdg_config, "jiramgr") if _xdg_config else os.path.expanduser("~/.config/jiramgr")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+TEMPLATES_DIR = os.path.join(CONFIG_DIR, "templates")
 
 # Templates ship in the repo alongside this script
 REPO_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
-# Legacy config path (pre-migration)
+# Legacy paths (pre-XDG)
+LEGACY_CONFIG_DIR = os.path.expanduser("~/.jiramgr")
+LEGACY_CONFIG_PATH = os.path.join(LEGACY_CONFIG_DIR, "config.json")
+LEGACY_TEMPLATES_DIR = os.path.join(LEGACY_CONFIG_DIR, "templates")
 OLD_CONFIG_PATH = os.path.expanduser("~/.jiramgr.json")
 
 
@@ -63,11 +68,38 @@ def warn(msg):
 
 # ── Config ───────────────────────────────────────────────────
 
+def _migrate_legacy_config():
+    """One-time migration from legacy locations to XDG path.
+
+    Priority:
+      1. ~/.jiramgr.json  (oldest — single file)
+      2. ~/.jiramgr/      (pre-XDG directory with config.json + templates/)
+    """
+    if os.path.exists(CONFIG_PATH):
+        return  # already on XDG
+
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+
+    # Migrate ~/.jiramgr.json (oldest format)
+    if os.path.exists(OLD_CONFIG_PATH):
+        os.replace(OLD_CONFIG_PATH, CONFIG_PATH)
+        return
+
+    # Migrate ~/.jiramgr/ directory (pre-XDG)
+    if os.path.exists(LEGACY_CONFIG_PATH):
+        os.replace(LEGACY_CONFIG_PATH, CONFIG_PATH)
+        # Bring templates along if they exist
+        if os.path.isdir(LEGACY_TEMPLATES_DIR) and not os.path.exists(TEMPLATES_DIR):
+            os.replace(LEGACY_TEMPLATES_DIR, TEMPLATES_DIR)
+        # Remove old dir if now empty
+        try:
+            os.rmdir(LEGACY_CONFIG_DIR)
+        except OSError:
+            pass  # not empty or doesn't exist — leave it
+
+
 def load_config():
-    # Migrate old config location if needed
-    if not os.path.exists(CONFIG_PATH) and os.path.exists(OLD_CONFIG_PATH):
-        os.makedirs(JIRAMGR_DIR, exist_ok=True)
-        os.rename(OLD_CONFIG_PATH, CONFIG_PATH)
+    _migrate_legacy_config()
 
     if not os.path.exists(CONFIG_PATH):
         err(f"No config found. Run: {C.BOLD}jiramgr setup{C.NC}")
@@ -84,7 +116,7 @@ def load_config():
 
 
 def save_config(config):
-    os.makedirs(JIRAMGR_DIR, exist_ok=True)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
     fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(config, f, indent=2)
@@ -272,7 +304,7 @@ DEFAULT_TEMPLATE = """\
 def get_template(issue_type):
     """Return template content for an issue type.
 
-    Checks ~/.jiramgr/templates/ for a local override first, then falls back
+    Checks ~/.config/jiramgr/templates/ for a local override first, then falls back
     to the templates shipped in the repo, then to the built-in default.
     """
     custom = os.path.join(TEMPLATES_DIR, f"{issue_type}.md")
@@ -287,7 +319,7 @@ def get_template(issue_type):
 
 
 def cmd_install_templates(args):
-    """Copy repo templates to ~/.jiramgr/templates/ for local customization."""
+    """Copy repo templates to ~/.config/jiramgr/templates/ for local customization."""
     os.makedirs(TEMPLATES_DIR, exist_ok=True)
     for issue_type in ("story", "task", "spike"):
         src = os.path.join(REPO_TEMPLATES_DIR, f"{issue_type}.md")
@@ -847,7 +879,7 @@ def main():
     p.set_defaults(func=cmd_setup)
 
     # install-templates
-    p = subparsers.add_parser("install-templates", help="Copy default templates to ~/.jiramgr/templates/")
+    p = subparsers.add_parser("install-templates", help="Copy default templates to ~/.config/jiramgr/templates/")
     p.set_defaults(func=cmd_install_templates)
 
     # create: story | task | spike
