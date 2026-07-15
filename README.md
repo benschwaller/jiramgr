@@ -1,6 +1,7 @@
 # jiramgr
 
 Lightweight Jira card manager for the command line. Pure Python 3 — no pip, no go-jira, no dependencies.
+Made with assistance from AI - primarily GLM 5.2. 
 
 ## Quick start
 
