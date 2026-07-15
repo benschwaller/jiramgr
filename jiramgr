@@ -25,6 +25,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+import uuid
 from urllib.parse import quote
 
 JIRAMGR_DIR = os.path.expanduser("~/.jiramgr")
@@ -137,8 +138,32 @@ def jql_search(config, jql, fields, max_results=50):
 
 
 def find_active_sprint(config):
-    """Return the ID of the first active sprint, or None."""
-    result = api(config, "GET", "/rest/agile/1.0/sprint?state=active&maxResults=1")
+    """Return the ID of the first active sprint for the configured project.
+
+    Looks up the project's Scrum board, then queries that board's active
+    sprints. Returns None if no active sprint exists.
+    """
+    project = config.get("project")
+    board_id = None
+
+    # Find a Scrum board for this project (Kanban boards don't have sprints)
+    if project:
+        try:
+            board_result = api(
+                config, "GET",
+                f"/rest/agile/1.0/board?projectKeyOrId={quote(project)}&type=scrum&maxResults=1",
+            )
+            boards = board_result.get("values", [])
+            if boards:
+                board_id = boards[0]["id"]
+        except JiraError:
+            pass
+
+    if not board_id:
+        return None
+
+    # Query active sprints on the Scrum board
+    result = api(config, "GET", f"/rest/agile/1.0/board/{board_id}/sprint?state=active&maxResults=1")
     values = result.get("values", [])
     return values[0]["id"] if values else None
 
@@ -147,6 +172,8 @@ def find_active_sprint(config):
 
 def text_to_adf(text):
     """Convert plain text to Atlassian Document Format."""
+    if not text:
+        return {"type": "doc", "version": 1, "content": []}
     return {
         "type": "doc",
         "version": 1,
@@ -349,13 +376,19 @@ def markdown_to_adf(description_text, acceptance_criteria):
     if description_text:
         for para in re.split(r"\n\s*\n", description_text):
             para = para.strip()
-            if para:
-                content.append({
-                    "type": "paragraph",
-                    "content": [{"type": "text", "text": para}],
-                })
+            if not para:
+                continue
+            # Within a paragraph, split on single newlines and use hardBreaks
+            lines = para.split("\n")
+            para_content = []
+            for j, line in enumerate(lines):
+                if j > 0:
+                    para_content.append({"type": "hardBreak"})
+                para_content.append({"type": "text", "text": line})
+            content.append({"type": "paragraph", "content": para_content})
 
-    # Acceptance criteria -> heading + task list
+    # Acceptance criteria -> heading + task list (skip empty items)
+    acceptance_criteria = [item for item in acceptance_criteria if item]
     if acceptance_criteria:
         content.append({
             "type": "heading",
@@ -365,11 +398,15 @@ def markdown_to_adf(description_text, acceptance_criteria):
         tasks = []
         for item in acceptance_criteria:
             tasks.append({
-                "type": "task",
-                "attrs": {"state": "TODO"},
+                "type": "taskItem",
+                "attrs": {"localId": str(uuid.uuid4()), "state": "TODO"},
                 "content": [{"type": "text", "text": item}],
             })
-        content.append({"type": "taskList", "content": tasks})
+        content.append({
+            "type": "taskList",
+            "attrs": {"localId": str(uuid.uuid4())},
+            "content": tasks,
+        })
 
     return {"type": "doc", "version": 1, "content": content}
 
@@ -591,8 +628,8 @@ def cmd_create(args):
     elif args.sprint:
         try:
             sprint_id = find_active_sprint(config)
-        except JiraError:
-            sprint_id = None
+        except JiraError as e:
+            warn(f"Could not look up active sprint: {e}")
         if not sprint_id:
             warn("No active sprint found. Going to backlog.")
     else:
@@ -601,8 +638,8 @@ def cmd_create(args):
         if ans != "n":
             try:
                 sprint_id = find_active_sprint(config)
-            except JiraError:
-                sprint_id = None
+            except JiraError as e:
+                warn(f"Could not look up active sprint: {e}")
             if not sprint_id:
                 warn("No active sprint found. Going to backlog.")
 
